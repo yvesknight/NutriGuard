@@ -1,0 +1,91 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: users
+    // Fields: uid, email, age, weight, conditions (array), allergies (array), location, role
+    //
+    // Collection: local_foods
+    // Fields: name, region, costTier, nutritionalInfo, substitutes (array)
+    //
+    // Collection: meal_plans
+    // Fields: userId, createdAt, plan, safetyScore, status
+    //
+    // Collection: patients
+    // Fields: healthWorkerId, name, age, allergies (array), conditions (array), lastRecommendation
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "yveswizy@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isHealthWorker() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'health_worker';
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string &&
+             (!('role' in data) || data.role in ['user', 'health_worker', 'admin']);
+    }
+
+    function isValidMealPlan(data) {
+      return data.keys().hasAll(['userId', 'plan']) &&
+             data.userId is string &&
+             data.plan is string;
+    }
+
+    function isValidPatient(data) {
+      return data.keys().hasAll(['healthWorkerId', 'name']) &&
+             data.healthWorkerId is string &&
+             data.name is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) &&
+                    (request.resource.data.role == resource.data.role || isAdmin());
+    }
+
+    match /local_foods/{foodId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /meal_plans/{planId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && isValidMealPlan(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin()) && isValidMealPlan(request.resource.data);
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+
+    match /patients/{patientId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin());
+      allow create: if isAuthenticated() && isValidPatient(request.resource.data) && (isOwner(request.resource.data.healthWorkerId) || isAdmin());
+      allow update: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin()) && isValidPatient(request.resource.data);
+      allow delete: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin());
+    }
+  }
+}

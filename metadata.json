@@ -1,0 +1,5 @@
+{
+  "name": "NutriGuard: Multi-Agent Nutrition & Allergy Assistant",
+  "description": "A comprehensive multi-agent AI system for personalized nutrition, allergy safety, and chronic condition management.",
+  "requestFramePermissions": ["camera", "geolocation"]
+}

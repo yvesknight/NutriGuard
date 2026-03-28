@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user health and nutrition profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "age": { "type": "number" },
+        "weight": { "type": "number" },
+        "conditions": { "type": "array", "items": { "type": "string" } },
+        "allergies": { "type": "array", "items": { "type": "string" } },
+        "location": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "health_worker"] }
+      },
+      "required": ["uid", "email"]
+    },
+    "LocalFood": {
+      "title": "Local Food Item",
+      "description": "Region-specific food data",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "region": { "type": "string" },
+        "costTier": { "type": "string", "enum": ["low", "medium", "high"] },
+        "nutritionalInfo": { "type": "string" },
+        "substitutes": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["name", "region"]
+    },
+    "MealPlan": {
+      "title": "Meal Plan",
+      "description": "AI-generated meal plan for a user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "plan": { "type": "string" },
+        "safetyScore": { "type": "number" },
+        "status": { "type": "string", "enum": ["APPROVED", "BLOCKED"] }
+      },
+      "required": ["userId", "plan"]
+    },
+    "Patient": {
+      "title": "Patient Record",
+      "description": "Patient data managed by health workers",
+      "type": "object",
+      "properties": {
+        "healthWorkerId": { "type": "string" },
+        "name": { "type": "string" },
+        "age": { "type": "number" },
+        "allergies": { "type": "array", "items": { "type": "string" } },
+        "conditions": { "type": "array", "items": { "type": "string" } },
+        "lastRecommendation": { "type": "string" }
+      },
+      "required": ["healthWorkerId", "name"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    },
+    "/local_foods/{foodId}": {
+      "schema": "LocalFood",
+      "description": "Database of local food items"
+    },
+    "/meal_plans/{planId}": {
+      "schema": "MealPlan",
+      "description": "Generated meal plans"
+    },
+    "/patients/{patientId}": {
+      "schema": "Patient",
+      "description": "Patient records for health workers"
+    }
+  }
+}
