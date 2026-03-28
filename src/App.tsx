@@ -14,6 +14,8 @@ import {
   localFoodContextAgent, 
   orchestratorAgent, 
   healthWorkerAgent,
+  generateSpeech,
+  generateVideo,
   UserData,
   AgentResponse
 } from './services/agents';
@@ -39,7 +41,11 @@ import {
   Camera,
   Search,
   ArrowRight,
-  X
+  X,
+  Mic,
+  Volume2,
+  Video,
+  Play
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import ReactMarkdown from 'react-markdown';
@@ -70,16 +76,40 @@ export default function App() {
 
   const [triageInput, setTriageInput] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [generatingVideo, setGeneratingVideo] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const authInitialized = useRef(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        const profileDoc = await getDoc(doc(db, 'users', user.uid));
-        const profileData = profileDoc.exists() ? profileDoc.data() : null;
-        setState(prev => ({ ...prev, user, profile: profileData, loading: false }));
-      } else {
-        setState(prev => ({ ...prev, user: null, profile: null, loading: false }));
+      try {
+        if (user) {
+          const profileDoc = await getDoc(doc(db, 'users', user.uid));
+          const profileData = profileDoc.exists() ? profileDoc.data() : null;
+          setState(prev => ({ 
+            ...prev, 
+            user, 
+            profile: profileData, 
+            loading: false 
+          }));
+        } else {
+          setState(prev => ({ 
+            ...prev, 
+            user: null, 
+            profile: null, 
+            loading: false 
+          }));
+        }
+      } catch (err) {
+        console.error("Auth initialization error:", err);
+        setState(prev => ({ ...prev, loading: false }));
+        setError("Failed to load user profile. Please try refreshing.");
+      } finally {
+        authInitialized.current = true;
       }
     });
     return () => unsubscribe();
@@ -111,13 +141,88 @@ export default function App() {
     setState(prev => ({ ...prev, profile, activeTab: 'dashboard' }));
   };
 
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError("Speech recognition not supported in this browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      setIsListening(false);
+    };
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setTriageInput(prev => prev ? `${prev} ${transcript}` : transcript);
+    };
+
+    recognition.start();
+  };
+
+  const playSpeech = async (text: string) => {
+    try {
+      setIsPlaying(true);
+      const base64Audio = await generateSpeech(text);
+      if (base64Audio) {
+        // Sample rate is 24000 for Gemini TTS
+        const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+        audio.onended = () => setIsPlaying(false);
+        await audio.play();
+      } else {
+        setIsPlaying(false);
+      }
+    } catch (err) {
+      console.error("Speech playback failed", err);
+      setIsPlaying(false);
+      setError("Failed to generate speech.");
+    }
+  };
+
+  const handleGenerateVideo = async (prompt: string) => {
+    try {
+      setGeneratingVideo(true);
+      setError(null);
+
+      // Check for API key
+      const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await (window as any).aistudio.openSelectKey();
+      }
+
+      const apiKey = process.env.API_KEY || ""; 
+      const url = await generateVideo(prompt, apiKey);
+      if (url) {
+        setVideoUrl(url);
+      } else {
+        setError("Failed to generate video.");
+      }
+    } catch (err: any) {
+      console.error("Video generation failed", err);
+      if (err.message?.includes("Requested entity was not found")) {
+        await (window as any).aistudio.openSelectKey();
+      }
+      setError("Video generation failed. Please check your API key.");
+    } finally {
+      setGeneratingVideo(false);
+    }
+  };
+
   const runMultiAgentFlow = async () => {
     if (!state.profile) {
-      alert("Please complete your profile first.");
+      setError("Please complete your profile first.");
       setState(prev => ({ ...prev, activeTab: 'profile' }));
       return;
     }
 
+    setError(null);
     setState(prev => ({ 
       ...prev, 
       agentsRunning: true, 
@@ -176,8 +281,9 @@ export default function App() {
 
       setState(prev => ({ ...prev, agentsRunning: false, finalPlan: final, currentStep: 'Plan Ready' }));
 
-    } catch (error) {
-      console.error("Agent flow failed", error);
+    } catch (err) {
+      console.error("Agent flow failed", err);
+      setError("The AI analysis failed. This could be due to a token limit or network error. Please try a shorter request.");
       setState(prev => ({ ...prev, agentsRunning: false, currentStep: 'Error in flow' }));
     }
   };
@@ -266,6 +372,21 @@ export default function App() {
         </header>
 
         <div className="p-8 max-w-6xl mx-auto">
+          {error && (
+            <motion.div 
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center justify-between"
+            >
+              <div className="flex items-center gap-3 text-red-500">
+                <AlertTriangle className="w-5 h-5" />
+                <span className="text-sm font-medium">{error}</span>
+              </div>
+              <button onClick={() => setError(null)} className="text-zinc-500 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
           <AnimatePresence mode="wait">
             {state.activeTab === 'dashboard' && (
               <motion.div 
@@ -286,12 +407,23 @@ export default function App() {
                       </div>
                       
                       <div className="space-y-4">
-                        <textarea 
-                          value={triageInput}
-                          onChange={(e) => setTriageInput(e.target.value)}
-                          placeholder="Describe your meal, symptoms, or ask for a plan... (e.g., 'I want a high-iron meal plan for lunch')"
-                          className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-2xl p-4 text-zinc-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all resize-none font-mono text-sm"
-                        />
+                        <div className="relative">
+                          <textarea 
+                            value={triageInput}
+                            onChange={(e) => setTriageInput(e.target.value)}
+                            placeholder="Describe your meal, symptoms, or ask for a plan... (e.g., 'I want a high-iron meal plan for lunch')"
+                            className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-2xl p-4 text-zinc-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all resize-none font-mono text-sm"
+                          />
+                          <button 
+                            onClick={startListening}
+                            className={cn(
+                              "absolute bottom-4 right-4 p-3 rounded-full transition-all",
+                              isListening ? "bg-red-500 text-white animate-pulse" : "bg-zinc-800 text-zinc-400 hover:text-white"
+                            )}
+                          >
+                            <Mic className="w-5 h-5" />
+                          </button>
+                        </div>
                         
                         <div className="flex items-center gap-4">
                           <button 
@@ -397,14 +529,38 @@ export default function App() {
                             </div>
                             <h2 className="text-2xl font-bold tracking-tight">Compiled Recommendation</h2>
                           </div>
-                          <div className={cn(
-                            "px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest",
-                            state.finalPlan.safety_status === 'BLOCKED' ? 'bg-red-500 text-white' : 'bg-green-500 text-black'
-                          )}>
-                            {state.finalPlan.safety_status}
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => playSpeech(state.finalPlan.summary)}
+                              disabled={isPlaying}
+                              className="p-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg transition-all disabled:opacity-50"
+                              title="Listen to Summary"
+                            >
+                              {isPlaying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
+                            </button>
+                            <button 
+                              onClick={() => handleGenerateVideo(state.finalPlan.summary)}
+                              disabled={generatingVideo}
+                              className="p-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg transition-all disabled:opacity-50"
+                              title="Generate Video Demo"
+                            >
+                              {generatingVideo ? <Loader2 className="w-4 h-4 animate-spin" /> : <Video className="w-4 h-4" />}
+                            </button>
+                            <div className={cn(
+                              "px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest",
+                              state.finalPlan.safety_status === 'BLOCKED' ? 'bg-red-500 text-white' : 'bg-green-500 text-black'
+                            )}>
+                              {state.finalPlan.safety_status}
+                            </div>
                           </div>
                         </div>
                         
+                        {videoUrl && (
+                          <div className="rounded-2xl overflow-hidden border border-zinc-800 bg-black aspect-video flex items-center justify-center">
+                            <video src={videoUrl} controls className="w-full h-full" />
+                          </div>
+                        )}
+
                         <div className="prose prose-invert max-w-none prose-orange">
                           <ReactMarkdown>{state.finalPlan.markdown_plan}</ReactMarkdown>
                         </div>
@@ -494,9 +650,14 @@ export default function App() {
                       <button 
                         type="button"
                         onClick={async () => {
-                          const { seedData } = await import('./seed');
-                          await seedData();
-                          alert("Database seeded with local foods and sample patients!");
+                          try {
+                            const { seedData } = await import('./seed');
+                            await seedData();
+                            setError("Database seeded successfully!");
+                          } catch (err) {
+                            console.error("Seeding failed", err);
+                            setError("Failed to seed database.");
+                          }
                         }}
                         className="w-full py-2 border border-zinc-800 text-zinc-500 hover:text-white hover:border-zinc-600 rounded-xl transition-all text-xs uppercase tracking-widest"
                       >

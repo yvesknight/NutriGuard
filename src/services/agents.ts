@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { collection, getDocs, query, where, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase";
 
@@ -24,7 +24,7 @@ export async function triageAgent(userInput: string): Promise<any> {
     model: "gemini-3-flash-preview",
     contents: userInput,
     config: {
-      systemInstruction: "Classify user intent: 'meal_plan', 'allergy_check', 'symptom_advice', 'food_safety'. Extract structured data: age, weight, conditions (array), allergies (array), location. Return JSON.",
+      systemInstruction: "Classify user intent: 'meal_plan', 'allergy_check', 'symptom_advice', 'food_safety'. Extract structured data: age, weight, conditions (array), allergies (array), location. Be concise. Return JSON.",
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -152,10 +152,10 @@ export async function localFoodContextAgent(recommendations: string[], location:
 // Agent 5: Orchestrator Agent
 export async function orchestratorAgent(triageData: any, specialistOutputs: any[], safetyOutput: AgentResponse, localContext: any): Promise<any> {
   const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: "gemini-3.1-pro-preview",
     contents: `Triage: ${JSON.stringify(triageData)}. Specialists: ${JSON.stringify(specialistOutputs)}. Safety: ${JSON.stringify(safetyOutput)}. Local: ${JSON.stringify(localContext)}`,
     config: {
-      systemInstruction: "You are the Orchestrator. Compile a final personalized meal plan. Resolve conflicts (e.g., diabetes vs anemia). If safety status is BLOCKED, the plan must be a warning. Return a comprehensive markdown plan and a summary JSON.",
+      systemInstruction: "You are the Orchestrator. Compile a final personalized meal plan. Resolve conflicts (e.g., diabetes vs anemia). If safety status is BLOCKED, the plan must be a warning. Return a comprehensive markdown plan and a summary JSON. Be professional and concise, do not exceed 2000 words in the markdown plan.",
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -193,4 +193,55 @@ export async function healthWorkerAgent(patients: any[]): Promise<any> {
     }
   });
   return JSON.parse(response.text);
+}
+
+// Agent 7: Speech Synthesis (TTS)
+export async function generateSpeech(text: string): Promise<string | undefined> {
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash-preview-tts",
+    contents: [{ parts: [{ text: `Say this clearly and helpfully: ${text}` }] }],
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: 'Kore' },
+        },
+      },
+    },
+  });
+
+  return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+}
+
+// Agent 8: Video Generation (Veo)
+export async function generateVideo(prompt: string, apiKey: string): Promise<string | undefined> {
+  const veoAi = new GoogleGenAI({ apiKey });
+  let operation = await veoAi.models.generateVideos({
+    model: 'veo-3.1-fast-generate-preview',
+    prompt: `A helpful nutrition demonstration: ${prompt}`,
+    config: {
+      numberOfVideos: 1,
+      resolution: '720p',
+      aspectRatio: '16:9'
+    }
+  });
+
+  while (!operation.done) {
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    operation = await veoAi.operations.getVideosOperation({ operation: operation });
+  }
+
+  const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+  if (!downloadLink) return undefined;
+
+  const response = await fetch(downloadLink, {
+    method: 'GET',
+    headers: {
+      'x-goog-api-key': apiKey,
+    },
+  });
+
+  if (!response.ok) return undefined;
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
 }
