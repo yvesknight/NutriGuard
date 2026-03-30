@@ -10,9 +10,12 @@ import {
   nutritionAdvisorAgent, 
   generateSpeech,
   generateVideo,
+  generateHighQualityImage,
+  connectLive,
   UserData,
   AgentResponse
 } from './services/agents';
+import { LiveServerMessage } from "@google/genai";
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Activity, 
@@ -74,6 +77,21 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [generatingVideo, setGeneratingVideo] = useState(false);
+  
+  // Live API State
+  const [isLiveActive, setIsLiveActive] = useState(false);
+  const liveSessionRef = useRef<any>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioQueueRef = useRef<Int16Array[]>([]);
+  const isPlayingRef = useRef(false);
+
+  // High-Quality Image State
+  const [hqImagePrompt, setHqImagePrompt] = useState('');
+  const [hqImageSize, setHqImageSize] = useState<"1K" | "2K" | "4K">("1K");
+  const [hqImageUrl, setHqImageUrl] = useState<string | null>(null);
+  const [generatingHQImage, setGeneratingHQImage] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const authInitialized = useRef(false);
 
@@ -189,6 +207,159 @@ export default function App() {
     }
   };
 
+  // --- Live API Handlers ---
+  const toggleLiveSession = async () => {
+    if (isLiveActive) {
+      stopLiveSession();
+      return;
+    }
+    startLiveSession();
+  };
+
+  const startLiveSession = async () => {
+    try {
+      setError(null);
+
+      // Check for API key
+      const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await (window as any).aistudio.openSelectKey();
+      }
+      const apiKey = process.env.API_KEY || "";
+
+      setIsLiveActive(true);
+
+      // Initialize Audio Context
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      }
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      // Setup Microphone
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      source.connect(processor);
+      processor.connect(ctx.destination);
+
+      processor.onaudioprocess = (e) => {
+        if (!liveSessionRef.current) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        // Convert to PCM 16-bit
+        const pcmData = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+        }
+        const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+        liveSessionRef.current.sendRealtimeInput({
+          audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+        });
+      };
+
+      // Connect to Live API
+      const session = await connectLive({
+        onopen: () => console.log("Live session opened"),
+        onmessage: async (message: LiveServerMessage) => {
+          const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+          if (base64Audio) {
+            const binary = atob(base64Audio);
+            const pcm = new Int16Array(new Uint8Array(Array.from(binary, c => c.charCodeAt(0))).buffer);
+            audioQueueRef.current.push(pcm);
+            if (!isPlayingRef.current) playNextInQueue();
+          }
+          if (message.serverContent?.interrupted) {
+            audioQueueRef.current = [];
+            isPlayingRef.current = false;
+          }
+        },
+        onerror: (err) => {
+          console.error("Live API error", err);
+          stopLiveSession();
+        },
+        onclose: () => {
+          console.log("Live session closed");
+          stopLiveSession();
+        }
+      }, "You are a helpful nutrition assistant. Talk to the user in a friendly and professional manner.", apiKey);
+
+      liveSessionRef.current = session;
+    } catch (err) {
+      console.error("Failed to start live session", err);
+      setError("Failed to access microphone or connect to Live API.");
+      stopLiveSession();
+    }
+  };
+
+  const stopLiveSession = () => {
+    setIsLiveActive(false);
+    if (liveSessionRef.current) {
+      liveSessionRef.current.close();
+      liveSessionRef.current = null;
+    }
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    audioQueueRef.current = [];
+    isPlayingRef.current = false;
+  };
+
+  const playNextInQueue = async () => {
+    if (audioQueueRef.current.length === 0 || !audioContextRef.current) {
+      isPlayingRef.current = false;
+      return;
+    }
+
+    isPlayingRef.current = true;
+    const ctx = audioContextRef.current;
+    const pcm = audioQueueRef.current.shift()!;
+    const buffer = ctx.createBuffer(1, pcm.length, 16000);
+    const channelData = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) {
+      channelData[i] = pcm[i] / 0x7FFF;
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.onended = () => playNextInQueue();
+    source.start();
+  };
+
+  // --- High-Quality Image Handlers ---
+  const handleGenerateHQImage = async () => {
+    if (!hqImagePrompt) return;
+    try {
+      setGeneratingHQImage(true);
+      setError(null);
+
+      // Check for API key
+      const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await (window as any).aistudio.openSelectKey();
+      }
+
+      const apiKey = process.env.API_KEY || ""; 
+      const url = await generateHighQualityImage(hqImagePrompt, hqImageSize, apiKey);
+      if (url) {
+        setHqImageUrl(url);
+      } else {
+        setError("Failed to generate high-quality image.");
+      }
+    } catch (err: any) {
+      console.error("HQ Image generation failed", err);
+      if (err.message?.includes("Requested entity was not found")) {
+        await (window as any).aistudio.openSelectKey();
+      }
+      setError("HQ Image generation failed. Please check your API key.");
+    } finally {
+      setGeneratingHQImage(false);
+    }
+  };
+
   const runAnalysis = async () => {
     if (!state.profile) {
       setError("Please complete your profile first.");
@@ -267,6 +438,30 @@ export default function App() {
             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
           </div>
           <div className="flex items-center gap-4">
+            {isLiveActive && (
+              <div className="flex items-center gap-1 h-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <motion.div
+                    key={i}
+                    animate={{ height: [4, 16, 4] }}
+                    transition={{ duration: 0.5, repeat: Infinity, delay: i * 0.1 }}
+                    className="w-1 bg-orange-500 rounded-full"
+                  />
+                ))}
+              </div>
+            )}
+            <button 
+              onClick={toggleLiveSession}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-xl transition-all font-bold text-xs uppercase tracking-widest",
+                isLiveActive 
+                  ? "bg-red-500 text-white animate-pulse" 
+                  : "bg-zinc-800 text-zinc-400 hover:text-white"
+              )}
+            >
+              <Mic className="w-4 h-4" />
+              {isLiveActive ? 'Live Session Active' : 'Start Live Voice Chat'}
+            </button>
             <span className="text-sm font-medium">{state.user.displayName}</span>
             <img src={state.user.photoURL || ''} className="w-8 h-8 rounded-full border border-zinc-700" alt="avatar" />
           </div>
@@ -434,6 +629,63 @@ export default function App() {
                   </div>
 
                   <div className="space-y-8">
+                    <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6 space-y-6">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 bg-orange-500/10 rounded-lg">
+                          <Camera className="w-5 h-5 text-orange-500" />
+                        </div>
+                        <h3 className="text-lg font-bold tracking-tight">HQ Image Generator</h3>
+                      </div>
+                      <div className="space-y-4">
+                        <textarea 
+                          value={hqImagePrompt}
+                          onChange={(e) => setHqImagePrompt(e.target.value)}
+                          placeholder="Describe the healthy meal image you want to generate..."
+                          className="w-full h-24 bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-zinc-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all resize-none text-xs"
+                        />
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex gap-1">
+                            {(["1K", "2K", "4K"] as const).map(size => (
+                              <button
+                                key={size}
+                                onClick={() => setHqImageSize(size)}
+                                className={cn(
+                                  "px-2 py-1 rounded text-[10px] font-bold transition-all",
+                                  hqImageSize === size ? "bg-orange-500 text-black" : "bg-zinc-800 text-zinc-400 hover:text-white"
+                                )}
+                              >
+                                {size}
+                              </button>
+                            ))}
+                          </div>
+                          <button 
+                            onClick={handleGenerateHQImage}
+                            disabled={generatingHQImage || !hqImagePrompt}
+                            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-black font-bold rounded-xl transition-all text-[10px] uppercase tracking-widest flex items-center gap-2"
+                          >
+                            {generatingHQImage ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                            Generate
+                          </button>
+                        </div>
+                        {hqImageUrl && (
+                          <motion.div 
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="relative group rounded-xl overflow-hidden border border-zinc-800"
+                          >
+                            <img src={hqImageUrl} className="w-full aspect-square object-cover" alt="HQ Generated" />
+                            <a 
+                              href={hqImageUrl} 
+                              download="hq-meal.png"
+                              className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white font-bold text-xs uppercase tracking-widest"
+                            >
+                              Download {hqImageSize}
+                            </a>
+                          </motion.div>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6 space-y-4">
                       <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500">User Profile</h3>
                       {!state.profile ? (

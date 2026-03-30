@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Modality, LiveServerMessage } from "@google/genai";
 import { collection, getDocs, query, where, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase";
 
@@ -106,4 +106,50 @@ export async function generateVideo(prompt: string, apiKey: string): Promise<str
   if (!response.ok) return undefined;
   const blob = await response.blob();
   return URL.createObjectURL(blob);
+}
+
+// High-Quality Image Generation (gemini-3.1-flash-image-preview)
+export async function generateHighQualityImage(prompt: string, size: "1K" | "2K" | "4K", apiKey: string): Promise<string | undefined> {
+  const imageAi = new GoogleGenAI({ apiKey });
+  const response = await imageAi.models.generateContent({
+    model: 'gemini-3.1-flash-image-preview',
+    contents: {
+      parts: [{ text: prompt }],
+    },
+    config: {
+      imageConfig: {
+        aspectRatio: "1:1",
+        imageSize: size
+      },
+    },
+  });
+
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData) {
+      return `data:image/png;base64,${part.inlineData.data}`;
+    }
+  }
+  return undefined;
+}
+
+// Live API Connection
+export function connectLive(callbacks: {
+  onopen: () => void;
+  onmessage: (message: LiveServerMessage) => void;
+  onerror: (error: any) => void;
+  onclose: () => void;
+}, systemInstruction: string, apiKey: string) {
+  // Always create a new instance to ensure it uses the latest API key if applicable
+  const liveAi = new GoogleGenAI({ apiKey });
+  return liveAi.live.connect({
+    model: "gemini-3.1-flash-live-preview",
+    callbacks,
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+      },
+      systemInstruction,
+    },
+  });
 }
