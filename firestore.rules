@@ -63,29 +63,19 @@ service cloud.firestore {
     // ===============================================================
 
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
-      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) &&
-                    (request.resource.data.role == resource.data.role || isAdmin());
+      allow read, write: if true;
     }
 
     match /local_foods/{foodId} {
-      allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow read, write: if true;
     }
 
     match /meal_plans/{planId} {
-      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
-      allow create: if isAuthenticated() && isValidMealPlan(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
-      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin()) && isValidMealPlan(request.resource.data);
-      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow read, write: if true;
     }
 
     match /patients/{patientId} {
-      allow read: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin());
-      allow create: if isAuthenticated() && isValidPatient(request.resource.data) && (isOwner(request.resource.data.healthWorkerId) || isAdmin());
-      allow update: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin()) && isValidPatient(request.resource.data);
-      allow delete: if isAuthenticated() && (isOwner(resource.data.healthWorkerId) || isAdmin());
+      allow read, write: if true;
     }
   }
 }

@@ -4,16 +4,10 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { auth, db, signIn, logOut } from './firebase';
-import { onAuthStateChanged, User } from 'firebase/auth';
+import { db } from './firebase';
 import { doc, getDoc, setDoc, collection, addDoc, query, where, getDocs, serverTimestamp } from 'firebase/firestore';
 import { 
-  triageAgent, 
-  allergySafetyAgent, 
-  conditionSpecialistAgent, 
-  localFoodContextAgent, 
-  orchestratorAgent, 
-  healthWorkerAgent,
+  nutritionAdvisorAgent, 
   generateSpeech,
   generateVideo,
   UserData,
@@ -24,22 +18,16 @@ import {
   Activity, 
   AlertTriangle, 
   CheckCircle2, 
-  ChevronRight, 
   ClipboardList, 
   Heart, 
   Home, 
   Info, 
-  Layers, 
   Loader2, 
-  LogOut, 
   MapPin, 
-  Plus, 
   ShieldCheck, 
-  Stethoscope, 
   User as UserIcon, 
   Utensils,
   Camera,
-  Search,
   ArrowRight,
   X,
   Mic,
@@ -52,25 +40,30 @@ import ReactMarkdown from 'react-markdown';
 
 // --- Types ---
 interface AppState {
-  user: User | null;
+  user: { uid: string; displayName: string; email: string; photoURL: string | null };
   profile: any | null;
   loading: boolean;
-  activeTab: 'dashboard' | 'profile' | 'healthworker' | 'mealplan';
+  activeTab: 'dashboard' | 'profile' | 'mealplan';
   agentsRunning: boolean;
   currentStep: string;
-  agentLogs: { id: string; name: string; status: 'pending' | 'success' | 'error' | 'blocked'; output?: any }[];
   finalPlan: any | null;
 }
 
+const PERSONAL_USER = {
+  uid: 'personal-user',
+  displayName: 'Personal User',
+  email: 'personal@example.com',
+  photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=personal'
+};
+
 export default function App() {
   const [state, setState] = useState<AppState>({
-    user: null,
+    user: PERSONAL_USER,
     profile: null,
     loading: true,
     activeTab: 'dashboard',
     agentsRunning: false,
     currentStep: '',
-    agentLogs: [],
     finalPlan: null,
   });
 
@@ -85,51 +78,32 @@ export default function App() {
   const authInitialized = useRef(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const loadProfile = async () => {
       try {
-        if (user) {
-          const profileDoc = await getDoc(doc(db, 'users', user.uid));
-          const profileData = profileDoc.exists() ? profileDoc.data() : null;
-          setState(prev => ({ 
-            ...prev, 
-            user, 
-            profile: profileData, 
-            loading: false 
-          }));
-        } else {
-          setState(prev => ({ 
-            ...prev, 
-            user: null, 
-            profile: null, 
-            loading: false 
-          }));
-        }
+        const profileDoc = await getDoc(doc(db, 'users', PERSONAL_USER.uid));
+        const profileData = profileDoc.exists() ? profileDoc.data() : null;
+        setState(prev => ({ 
+          ...prev, 
+          profile: profileData, 
+          loading: false 
+        }));
       } catch (err) {
-        console.error("Auth initialization error:", err);
+        console.error("Profile load error:", err);
         setState(prev => ({ ...prev, loading: false }));
         setError("Failed to load user profile. Please try refreshing.");
       } finally {
         authInitialized.current = true;
       }
-    });
-    return () => unsubscribe();
+    };
+    loadProfile();
   }, []);
-
-  const handleSignIn = async () => {
-    try {
-      await signIn();
-    } catch (error) {
-      console.error("Sign in failed", error);
-    }
-  };
 
   const handleSaveProfile = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!state.user) return;
     const formData = new FormData(e.currentTarget);
     const profile = {
-      uid: state.user.uid,
-      email: state.user.email,
+      uid: PERSONAL_USER.uid,
+      email: PERSONAL_USER.email,
       age: Number(formData.get('age')),
       weight: Number(formData.get('weight')),
       conditions: formData.get('conditions')?.toString().split(',').map(s => s.trim()).filter(Boolean) || [],
@@ -137,7 +111,7 @@ export default function App() {
       location: formData.get('location')?.toString() || '',
       role: formData.get('role')?.toString() || 'user',
     };
-    await setDoc(doc(db, 'users', state.user.uid), profile);
+    await setDoc(doc(db, 'users', PERSONAL_USER.uid), profile);
     setState(prev => ({ ...prev, profile, activeTab: 'dashboard' }));
   };
 
@@ -215,7 +189,7 @@ export default function App() {
     }
   };
 
-  const runMultiAgentFlow = async () => {
+  const runAnalysis = async () => {
     if (!state.profile) {
       setError("Please complete your profile first.");
       setState(prev => ({ ...prev, activeTab: 'profile' }));
@@ -226,73 +200,34 @@ export default function App() {
     setState(prev => ({ 
       ...prev, 
       agentsRunning: true, 
-      agentLogs: [], 
-      currentStep: 'Triage & Intent Classification',
+      currentStep: 'Analyzing meal and profile...',
       finalPlan: null
     }));
 
     try {
-      // 1. Triage
-      const triage = await triageAgent(triageInput);
-      addLog('triage', 'Intake & Triage', 'success', triage);
-
-      // 2. Allergy Safety (Vision + Text)
-      setState(prev => ({ ...prev, currentStep: 'Allergy Safety Check' }));
-      const ingredients = triage.data.ingredients || triageInput.split(' '); // Fallback
-      const safety = await allergySafetyAgent(ingredients, state.profile.allergies, imagePreview || undefined);
-      addLog('safety', 'Allergy Safety Agent', safety.status === 'BLOCKED' ? 'blocked' : 'success', safety.output);
-
-      if (safety.status === 'BLOCKED') {
-        const final = await orchestratorAgent(triage, [], safety, {});
-        setState(prev => ({ ...prev, agentsRunning: false, finalPlan: final, currentStep: 'Completed (Safety Blocked)' }));
-        return;
-      }
-
-      // 3. Specialist Agents
-      setState(prev => ({ ...prev, currentStep: 'Specialist Consultation' }));
-      const specialistTasks = (triage.data.conditions || state.profile.conditions).map((c: string) => 
-        conditionSpecialistAgent(c.toLowerCase(), state.profile)
-      );
-      if (specialistTasks.length === 0) specialistTasks.push(conditionSpecialistAgent('general', state.profile));
+      const result = await nutritionAdvisorAgent(triageInput, state.profile, imagePreview || undefined);
       
-      const specialistOutputs = await Promise.all(specialistTasks);
-      addLog('specialists', 'Condition Specialists', 'success', specialistOutputs);
-
-      // 4. Local Context
-      setState(prev => ({ ...prev, currentStep: 'Local Food Context Mapping' }));
-      const allRecs = specialistOutputs.flatMap(o => o.recommendations);
-      const localContext = await localFoodContextAgent(allRecs, state.profile.location);
-      addLog('local', 'Local Context Agent', 'success', localContext);
-
-      // 5. Orchestrator
-      setState(prev => ({ ...prev, currentStep: 'Orchestrating Final Plan' }));
-      const final = await orchestratorAgent(triage, specialistOutputs, safety, localContext);
-      addLog('orchestrator', 'Orchestrator Agent', 'success', final);
-
       // Save to Firestore
       await addDoc(collection(db, 'meal_plans'), {
         userId: state.user?.uid,
         createdAt: serverTimestamp(),
-        plan: final.markdown_plan,
-        summary: final.summary,
-        safetyScore: safety.output.safety_score,
-        status: safety.status
+        plan: result.markdown_plan,
+        summary: result.summary,
+        safetyStatus: result.safety_status
       });
 
-      setState(prev => ({ ...prev, agentsRunning: false, finalPlan: final, currentStep: 'Plan Ready' }));
+      setState(prev => ({ 
+        ...prev, 
+        agentsRunning: false, 
+        finalPlan: result, 
+        currentStep: 'Analysis Complete' 
+      }));
 
     } catch (err) {
-      console.error("Agent flow failed", err);
-      setError("The AI analysis failed. This could be due to a token limit or network error. Please try a shorter request.");
-      setState(prev => ({ ...prev, agentsRunning: false, currentStep: 'Error in flow' }));
+      console.error("Analysis failed", err);
+      setError("The AI analysis failed. Please try a shorter request.");
+      setState(prev => ({ ...prev, agentsRunning: false, currentStep: 'Error' }));
     }
-  };
-
-  const addLog = (id: string, name: string, status: any, output: any) => {
-    setState(prev => ({
-      ...prev,
-      agentLogs: [...prev.agentLogs, { id, name, status, output }]
-    }));
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -314,31 +249,6 @@ export default function App() {
     );
   }
 
-  if (!state.user) {
-    return (
-      <div className="min-h-screen bg-[#0a0a0a] text-white flex flex-col items-center justify-center p-6 font-sans">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full text-center space-y-8"
-        >
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-orange-500/10 border border-orange-500/20 mb-4">
-            <ShieldCheck className="w-10 h-10 text-orange-500" />
-          </div>
-          <h1 className="text-5xl font-bold tracking-tighter uppercase italic font-serif">NutriGuard</h1>
-          <p className="text-zinc-400 text-lg">Multi-Agent Nutrition & Allergy Safety Assistant powered by Gemini AI.</p>
-          <button 
-            onClick={handleSignIn}
-            className="w-full py-4 bg-orange-500 hover:bg-orange-600 text-black font-bold rounded-xl transition-all flex items-center justify-center gap-2 text-lg uppercase tracking-widest"
-          >
-            Connect with Google
-            <ArrowRight className="w-5 h-5" />
-          </button>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-sans selection:bg-orange-500 selection:text-black">
       {/* Sidebar Navigation */}
@@ -347,16 +257,7 @@ export default function App() {
         
         <NavIcon active={state.activeTab === 'dashboard'} onClick={() => setState(p => ({...p, activeTab: 'dashboard'}))} icon={<Home />} label="Home" />
         <NavIcon active={state.activeTab === 'mealplan'} onClick={() => setState(p => ({...p, activeTab: 'mealplan'}))} icon={<Utensils />} label="Plans" />
-        {state.profile?.role === 'health_worker' && (
-          <NavIcon active={state.activeTab === 'healthworker'} onClick={() => setState(p => ({...p, activeTab: 'healthworker'}))} icon={<Stethoscope />} label="Health" />
-        )}
         <NavIcon active={state.activeTab === 'profile'} onClick={() => setState(p => ({...p, activeTab: 'profile'}))} icon={<UserIcon />} label="Profile" />
-        
-        <div className="mt-auto">
-          <button onClick={logOut} className="p-3 text-zinc-500 hover:text-white transition-colors">
-            <LogOut className="w-6 h-6" />
-          </button>
-        </div>
       </nav>
 
       <main className="pl-20 min-h-screen">
@@ -455,18 +356,18 @@ export default function App() {
 
                         <button 
                           disabled={state.agentsRunning || !triageInput}
-                          onClick={runMultiAgentFlow}
+                          onClick={runAnalysis}
                           className="w-full py-4 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-black font-bold rounded-2xl transition-all flex items-center justify-center gap-2 uppercase tracking-widest"
                         >
                           {state.agentsRunning ? (
                             <>
                               <Loader2 className="w-5 h-5 animate-spin" />
-                              Processing Agents...
+                              Analyzing...
                             </>
                           ) : (
                             <>
-                              <Layers className="w-5 h-5" />
-                              Initialize Multi-Agent Flow
+                              <Activity className="w-5 h-5" />
+                              Get Nutrition Advice
                             </>
                           )}
                         </button>
@@ -474,45 +375,9 @@ export default function App() {
                     </div>
 
                     {state.agentsRunning && (
-                      <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-8 space-y-6">
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-lg font-bold flex items-center gap-2">
-                            <Layers className="w-5 h-5 text-orange-500" />
-                            Agent Communication Bus
-                          </h3>
-                          <span className="text-xs font-mono text-zinc-500 uppercase">{state.currentStep}</span>
-                        </div>
-                        
-                        <div className="space-y-3">
-                          {state.agentLogs.map((log, i) => (
-                            <motion.div 
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              key={log.id}
-                              className="flex items-center gap-4 p-4 bg-zinc-950 border border-zinc-800 rounded-xl"
-                            >
-                              <div className={cn(
-                                "w-2 h-2 rounded-full",
-                                log.status === 'success' ? 'bg-green-500' : 
-                                log.status === 'blocked' ? 'bg-red-500' : 'bg-orange-500 animate-pulse'
-                              )} />
-                              <span className="text-sm font-mono flex-1">{log.name}</span>
-                              <span className={cn(
-                                "text-[10px] uppercase tracking-widest font-bold px-2 py-1 rounded",
-                                log.status === 'success' ? 'bg-green-500/10 text-green-500' : 
-                                log.status === 'blocked' ? 'bg-red-500/10 text-red-500' : 'bg-orange-500/10 text-orange-500'
-                              )}>
-                                {log.status}
-                              </span>
-                            </motion.div>
-                          ))}
-                          {state.agentsRunning && (
-                            <div className="flex items-center gap-4 p-4 bg-zinc-950/50 border border-dashed border-zinc-800 rounded-xl opacity-50">
-                              <Loader2 className="w-4 h-4 animate-spin text-orange-500" />
-                              <span className="text-sm font-mono italic">Awaiting next agent response...</span>
-                            </div>
-                          )}
-                        </div>
+                      <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-8 flex items-center justify-center gap-4">
+                        <Loader2 className="w-6 h-6 animate-spin text-orange-500" />
+                        <span className="text-sm font-mono italic">{state.currentStep}</span>
                       </div>
                     )}
 
@@ -591,13 +456,10 @@ export default function App() {
                     </div>
 
                     <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6 space-y-4">
-                      <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500">System Architecture</h3>
+                      <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500">System Info</h3>
                       <div className="space-y-3">
-                        <AgentNode name="Triage Agent" model="Gemini 3 Flash" />
-                        <AgentNode name="Safety Agent" model="Gemini 3.1 Pro" />
-                        <AgentNode name="Specialist Agents" model="Condition-Specific" />
-                        <AgentNode name="Context Agent" model="Firestore RAG" />
-                        <AgentNode name="Orchestrator" model="Agent Engine" />
+                        <AgentNode name="Advisor Agent" model="Gemini 3.1 Pro" />
+                        <AgentNode name="Storage" model="Firestore" />
                       </div>
                     </div>
                   </div>
@@ -671,10 +533,6 @@ export default function App() {
 
             {state.activeTab === 'mealplan' && (
               <MealPlansView userId={state.user.uid} />
-            )}
-
-            {state.activeTab === 'healthworker' && (
-              <HealthWorkerDashboard user={state.user} />
             )}
           </AnimatePresence>
         </div>
@@ -777,106 +635,6 @@ function MealPlansView({ userId }: { userId: string }) {
             <p className="text-zinc-500">No meal plans generated yet.</p>
           </div>
         )}
-      </div>
-    </motion.div>
-  );
-}
-
-function HealthWorkerDashboard({ user }: { user: User }) {
-  const [patients, setPatients] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [batchResults, setBatchResults] = useState<any[] | null>(null);
-  const [processing, setProcessing] = useState(false);
-
-  useEffect(() => {
-    const fetchPatients = async () => {
-      const q = query(collection(db, 'patients'), where('healthWorkerId', '==', user.uid));
-      const snapshot = await getDocs(q);
-      setPatients(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      setLoading(false);
-    };
-    fetchPatients();
-  }, [user.uid]);
-
-  const handleBatchProcess = async () => {
-    if (patients.length === 0) return;
-    setProcessing(true);
-    try {
-      const results = await healthWorkerAgent(patients);
-      setBatchResults(results);
-    } catch (error) {
-      console.error("Batch processing failed", error);
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  if (loading) return <div className="flex justify-center p-12"><Loader2 className="animate-spin text-orange-500" /></div>;
-
-  return (
-    <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      className="space-y-8"
-    >
-      <div className="flex items-center justify-between">
-        <h2 className="text-3xl font-bold tracking-tight">Community Health Dashboard</h2>
-        <button 
-          onClick={handleBatchProcess}
-          disabled={processing || patients.length === 0}
-          className="px-6 py-2 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-black font-bold rounded-xl transition-all uppercase tracking-widest text-xs flex items-center gap-2"
-        >
-          {processing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layers className="w-4 h-4" />}
-          Batch Process Patients
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="space-y-6">
-          <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500">Patient Registry</h3>
-          <div className="space-y-4">
-            {patients.map(p => (
-              <div key={p.id} className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
-                <div>
-                  <h4 className="font-bold">{p.name}</h4>
-                  <p className="text-xs text-zinc-500">{p.age} years • {p.conditions?.join(', ') || 'No conditions'}</p>
-                </div>
-                <ChevronRight className="w-5 h-5 text-zinc-700" />
-              </div>
-            ))}
-            <button className="w-full py-4 border-2 border-dashed border-zinc-800 rounded-2xl text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-all flex items-center justify-center gap-2 text-sm">
-              <Plus className="w-4 h-4" />
-              Add New Patient
-            </button>
-          </div>
-        </div>
-
-        <div className="space-y-6">
-          <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500">Batch Analysis Results</h3>
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6 min-h-[300px]">
-            {batchResults ? (
-              <div className="space-y-4">
-                {batchResults.map((res, i) => (
-                  <div key={i} className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold">{res.patient_name}</span>
-                      <span className={cn(
-                        "text-[10px] font-bold px-2 py-0.5 rounded",
-                        res.priority === 'High' ? 'bg-red-500/10 text-red-500' : 'bg-zinc-500/10 text-zinc-500'
-                      )}>{res.priority}</span>
-                    </div>
-                    <p className="text-xs text-zinc-400">{res.recommendation}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
-                <Search className="w-12 h-12 mb-4" />
-                <p className="text-sm">Run batch processing to see patient recommendations.</p>
-              </div>
-            )}
-          </div>
-        </div>
       </div>
     </motion.div>
   );
